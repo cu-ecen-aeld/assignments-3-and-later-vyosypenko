@@ -4,6 +4,7 @@
 
 set -e
 set -u
+set -x
 
 NUMFILES=10
 WRITESTR=AELD_IS_FUN
@@ -18,7 +19,7 @@ then
 		echo "Using default value ${NUMFILES} for number of files to write"
 	else
 		NUMFILES=$1
-	fi	
+	fi
 else
 	NUMFILES=$1
 	WRITESTR=$2
