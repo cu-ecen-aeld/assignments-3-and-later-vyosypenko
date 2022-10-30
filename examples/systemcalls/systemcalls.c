@@ -1,4 +1,8 @@
 #include "systemcalls.h"
+#include  <stdlib.h>
+#include  <unistd.h>
+#include  <sys/wait.h>
+#include  <fcntl.h>
 
 /**
  * @param cmd the command to execute with system()
@@ -16,8 +20,10 @@ bool do_system(const char *cmd)
  *   and return a boolean true if the system() call completed with success
  *   or false() if it returned a failure
 */
-
-    return true;
+    if(system(cmd) != -1)
+        return true;
+    else
+        return false;
 }
 
 /**
@@ -49,6 +55,8 @@ bool do_exec(int count, ...)
     // and may be removed
     command[count] = command[count];
 
+    va_end(args);
+
 /*
  * TODO:
  *   Execute a system command by calling fork, execv(),
@@ -59,7 +67,31 @@ bool do_exec(int count, ...)
  *
 */
 
-    va_end(args);
+    int status;
+
+    pid_t pid = fork();
+
+    if (pid == -1)
+    {
+        printf("Failed to fork() \n");
+	    return false;
+    }
+    else if(pid == 0)
+    {
+        /* child proccess */
+        execv(command[0], command);
+        /* this line will never execute, if execv run successully */
+        _exit(127);
+    }
+    
+	if (waitpid(pid, &status, 0) == -1)
+    {
+        return false;
+    }
+    else if (WIFEXITED (status))
+    {
+        return (WEXITSTATUS (status) == 0);
+    }
 
     return true;
 }
@@ -84,6 +116,8 @@ bool do_exec_redirect(const char *outputfile, int count, ...)
     // and may be removed
     command[count] = command[count];
 
+    va_end(args);
+
 
 /*
  * TODO
@@ -92,8 +126,41 @@ bool do_exec_redirect(const char *outputfile, int count, ...)
  *   The rest of the behaviour is same as do_exec()
  *
 */
+    pid_t pid;
+    int status;
+    int fd = open(outputfile, O_WRONLY|O_TRUNC|O_CREAT, 0644);
+    if (fd < 0) 
+    { 
+        printf("failed to open %s file\n", outputfile); 
+        return false;
+    }
 
-    va_end(args);
+    pid = fork();
 
+    if (pid == -1)
+    {
+        printf("Failed to fork() \n");
+	    return false;
+    }
+    else if (pid == 0)
+    {
+        if (dup2(fd, 1) < 0)
+        {
+            return false;
+        }
+        close(fd);
+        execv (command[0], command);
+        exit (127);
+    }
+
+    if (waitpid (pid, &status, 0) == -1)
+    {
+        return false;
+    }
+    else if (WIFEXITED (status))
+    {
+        return (WEXITSTATUS (status) == 0);
+    }
+    
     return true;
 }
