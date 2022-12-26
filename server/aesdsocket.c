@@ -13,6 +13,7 @@
 #include <fcntl.h>
 #include <sys/wait.h>
 #include <syslog.h>
+#include <errno.h> 
 
 // ToDO:
 // 1. Open a stream socket bound to port 9000, falling and returning -1
@@ -58,13 +59,13 @@ int init_signal_actions(void)
 
     if(sigaction(SIGTERM, &action, NULL) != 0)
     {
-        printf("Error registering for SIGTERM");
+        printf("Error registering for SIGTERM\n");
         return 1;
     }
 
     if(sigaction(SIGINT, &action, NULL) != 0)
     {
-       printf("Error registering for SIGINT");
+       printf("Error registering for SIGINT\n");
        return 2;
     }
 
@@ -93,7 +94,7 @@ int main(int argc, char **argv)
     printf("Socket application is started...\n");
 
     memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_UNSPEC;
+    hints.ai_family = PF_INET;
     hints.ai_socktype = SOCK_STREAM;
     hints.ai_flags = AI_PASSIVE;
 
@@ -109,20 +110,28 @@ int main(int argc, char **argv)
         printf("ERROR: socket function failed\n");
         return -1;
     }
-    
+    else
+    {
+        printf("INFO: socket function run return success, socket descriptor: %d\n", socket_fd);
+    }
+
     int optval = 1;
     setsockopt(socket_fd, SOL_SOCKET, SO_REUSEPORT, &optval, sizeof(optval));
 
     if(-1 == bind(socket_fd, res->ai_addr, res->ai_addrlen))
     {
         printf("ERROR: bind function failed\n");
+        printf("errno: %d\n", errno);
         return -1;
     }
 
     if ((argc > 1) && (strcmp(argv[1], "-d") == 0))
     {
-        if (fork() > 0)
-            exit(0);
+        int pid = fork();
+        if ( 0 == pid)
+            printf("Working in child proccess\n");
+        else if (pid > 0)
+            exit(-1);
     }
 
     // ToDo: Free serviceinfo
@@ -135,16 +144,14 @@ int main(int argc, char **argv)
     socklen_t client_addr_size = sizeof(struct sockaddr_in);
 
     while(1)
-    {   
-        printf("\n--------------------------------------------------\n");
-        // clear data buffer
-        // memset(rx_buff, 0, RX_BUFF_SIZE);
-        printf("INFO: waitig for connection...");
+    {
+        printf("INFO: waitig for connection...\n");
+        printf("--------------------------------------------------\n");
 
         conn_fd = accept(socket_fd, (struct sockaddr*)&client_addr, &client_addr_size); //location to save client
         if (-1 == conn_fd)
 	    {
-	        printf("\nERROR accept function failed\n");
+	        printf("ERROR accept function failed\n");
             return -1;
         }
         client_ip = inet_ntoa(((struct sockaddr_in*)&client_addr)->sin_addr);
@@ -180,11 +187,11 @@ int main(int argc, char **argv)
             //send(conn_fd, rx_buff, buf_size, 0);
         }
         while(buf_size > 0);
-    
+
     //write(conn_fd, "\n", 1);
     close(pfile);
 
-    printf("Closed connection from %s\n", client_ip);
+    printf("Closed connection from %s\n\n", client_ip);
     close(conn_fd);
     }
     return 0;
