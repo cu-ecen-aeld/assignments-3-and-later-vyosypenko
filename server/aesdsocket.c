@@ -17,7 +17,15 @@
 #include <pthread.h>
 #include <sys/ioctl.h>      
 #include <sys/queue.h>
+#include <stdbool.h>
+#include <signal.h>
 
+
+//#include "task_queue.h"
+//#include <asm-generic/socket.h>
+
+// ToDo:
+// Add conn to task queue
 
 // ToDO:
 // 1. Open a stream socket bound to port 9000, falling and returning -1
@@ -43,13 +51,11 @@ d. Use the singly linked list APIs discussed in the video (or your own implement
     i. Use pthread_join() to join completed threads, do not use detached threads for this assignment.
 */
 
-#define RX_BUFF_SIZE (30720) // 30Kb
+#define RX_BUFF_SIZE (128 * 1024)
 
-// ToDO: change print to syslog
 
 static struct sockaddr_in client_addr;
 static char *client_ip = NULL;
-static char rx_buff[RX_BUFF_SIZE];
 static int bytes_read = 0;
 
 static pthread_mutex_t lock;
@@ -59,86 +65,78 @@ int socket_fd = 0;
 char* data_file = "/var/tmp/aesdsocketdata";
 char* port_addr = "9000";
 
+static char rfc2822_string[50];
+static time_t current_time;
+static struct tm * time_info;
 
-// Define the structure for the list elements
-struct ConnWorkItem {
-    int work_compleated;
+//static struct TaskQueue* task_queue;
+
+struct thead_queue_t {
     pthread_t ptid;
-    SLIST_ENTRY(ConnWorkItem) entries; // Define the list entry
+    int thead_finished;
+    SLIST_ENTRY(thead_queue_t) entries;
 };
-SLIST_HEAD(ListHead, ConnWorkItem) task_list = SLIST_HEAD_INITIALIZER(task_list); // Define the list head
 
-//struct ListHead task_list;
+SLIST_HEAD(thead_queue_head, thead_queue_t) head = SLIST_HEAD_INITIALIZER(head);
 
-// Define the queue head
-//LIST_HEAD(SocketWorkList, SocketWorkItem) socket_work_list = LIST_HEAD_INITIALIZER(&socket_work_list);
 
 
 void update_data_file(char* buff, int size)
 {
     int file_fd = 0;
 
-    //pthread_mutex_lock(&lock);
     if ((file_fd = open(data_file, O_CREAT|O_WRONLY|O_APPEND, 0662)) != -1)
     {
+        syslog(LOG_DEBUG, "Data file %s is opened successfully\n", data_file);
         write(file_fd, buff, size);
         close(file_fd);
     }
     else
     {
-        //perror("Error opening the file %s\n", data_file);
         syslog(LOG_ERR, "Error opening the file %s\n", data_file);
     }
-
-    
-    //pthread_mutex_unlock(&lock);
 }
 
 void signal_handler(int signo)
 {
-   printf("Recieved signal with id %d\n", signo);
    syslog(LOG_INFO, "Recieved signal with id %d\n", signo);
    if ((signo == SIGINT) || (signo == SIGTERM))
    {
-        printf("Caught signal, exiting\n");
         syslog(LOG_INFO, "Caught signal, exiting\n");
 
-        printf("Closing connection ...\n");
         syslog(LOG_INFO, "Closing connection\n");
-        close(conn_fd);
+        close(conn_fd); // check to close all conections, iterate to close all of them
 
-        printf("Closing socket ...\n");
         syslog(LOG_INFO, "Closing socket\n");
         close(socket_fd);
 
-        printf("Removing %s file...\n", data_file);
         syslog(LOG_INFO, "Removing %s file...\n", data_file);
         remove(data_file);
 
-        syslog(LOG_INFO, "Clean up task queue");
-        
-        struct ConnWorkItem *iter, *prev_node = NULL;
-        
-        SLIST_FOREACH(iter, &task_list, entries) 
-        {
-            if (prev_node == NULL) {
-                SLIST_REMOVE_HEAD(&task_list, entries);
-            } else {
-                SLIST_REMOVE(&task_list, prev_node, ConnWorkItem, entries);
-            }
-                
-            pthread_join(iter->ptid, NULL); 
-            free(iter);
-            prev_node = iter;
-        }
+        syslog(LOG_INFO, "Destroy the mutex\n");
+        pthread_mutex_destroy(&lock);
 
-       //_exit(1);
+        syslog(LOG_INFO, "Clean up task queue\n");
+        
+        //struct ConnWorkItem *iter, *prev_node = NULL;
+        
+        // SLIST_FOREACH(iter, &task_list, entries) 
+        // {
+        //     if (prev_node == NULL) {
+        //         SLIST_REMOVE_HEAD(&task_list, entries);
+        //     } else {
+        //         SLIST_REMOVE(&task_list, prev_node, ConnWorkItem, entries);
+        //     }
+        //     free(iter);
+        //     prev_node = iter;
+        // }
    }
 
-   if (signo == SIGINT)
-       exit(SIGINT);
-   if (signo == SIGINT) 
-       exit(SIGTERM);
+//    if (signo == SIGINT)
+//        exit(SIGINT);
+//    if (signo == SIGINT) 
+//        exit(SIGTERM);
+    _exit(-1);
 }
 
 int init_signal_actions(void)
@@ -149,13 +147,13 @@ int init_signal_actions(void)
 
     if(sigaction(SIGTERM, &action, NULL) != 0)
     {
-        printf("Error registering for SIGTERM\n");
+        syslog(LOG_PERROR, "Error registering for SIGTERM\n");
         return 1;
     }
 
     if(sigaction(SIGINT, &action, NULL) != 0)
     {
-       printf("Error registering for SIGINT\n");
+       syslog(LOG_PERROR, "Error registering for SIGINT\n");
        return 2;
     }
 
@@ -165,74 +163,138 @@ int init_signal_actions(void)
 void* connection_hadler(void* arg)
 {
     int conn = *(int*)arg;
-    //int data_len = 0;
-    int buf_size = 0;
+    static char rx_buff[RX_BUFF_SIZE];
+    //int buf_size = 0;
 
-    pthread_t tid = pthread_self();
 
-    
+
     client_ip = inet_ntoa(((struct sockaddr_in*)&client_addr)->sin_addr);
-
     syslog(LOG_INFO, "Accepted connection from %s\n", client_ip);
-
-    printf("connection_hadler: Accepted connection from %s\n", client_ip);
     
+    bytes_read = recv(conn, rx_buff, sizeof(rx_buff), 0);
+    syslog(LOG_INFO, "Read  %d bytes read from the socket: \n", bytes_read);
 
-    /* Recive data from the socket */
-
-    
-    //ioctl(conn, FIONREAD, &data_len);
-    //printf("Amount of data %d!!!!!!\n", data_len);
-
-    //work_compleated
-
-    
-    // while ((data_read = recv(socket_fd, &data, 1, 0)) > 0 && data != '\n')
-    //     *message++ = data;
-      
-    // if (data_read == -1) {
-    //     perror("CLIENT: ERROR recv()");
-    //     exit(EXIT_FAILURE);
-    // }
-
-    //while bytes_read = recv(conn_fd, rx_buff, sizeof(rx_buff), 0)
-
-    bytes_read = recv(conn_fd, rx_buff, sizeof(rx_buff), 0);
-    printf("connection_hadler: bytes read from the socket: %d\n", bytes_read);
-    printf("connection_hadler: rx_buff: ");
     if(bytes_read > 0)
     {
-        for (int i=0; i<bytes_read; i++)
-            printf("%c", rx_buff[i]);
-        write(conn_fd, rx_buff, buf_size);
+        syslog(LOG_DEBUG, "%s", rx_buff);
+        printf("conn: %d rx_buff: %s\n", conn, rx_buff);
+
+
+
+        pthread_mutex_lock(&lock);
+
+        // write back to socket 
+        write(conn, rx_buff, bytes_read);
+
+        update_data_file(rx_buff, bytes_read);
+        pthread_mutex_unlock(&lock);
     }
-    printf("connection_hadler: Reading from socked compleated\n\n");
-
-    //pthread_mutex_lock(&lock);
-
-    //write_to_file
-
-    //pthread_mutex_unlock(&lock);
+    syslog(LOG_INFO, "Reading from socked compleated\n");
+    printf("DEBUG: Reading from socked compleated\n");
 
 
-    struct ConnWorkItem *work_item;
-    //SLIST_FOREACH(work_item,  &task_list, entries)  {
-    SLIST_FOREACH(work_item,  &task_list, entries)  {
-        if (work_item->ptid == tid) {
-            // Found the element with ptid equal to 100
-            // Perform operations on the found element
-            printf("connection_hadler: tid %ld\n", tid);
-            work_item->work_compleated = 1;
+    pthread_t tid = pthread_self();
+    syslog(LOG_DEBUG,"tid: %ld \n", tid);
+    printf("DEBUG tid: %ld \n", tid);
+
+    struct thead_queue_t *iter = NULL;
+    SLIST_FOREACH(iter, &head, entries)
+    {
+        if (iter->ptid == tid) {
+            syslog(LOG_DEBUG, "Taks with tid: %ld finished\n", tid);
+            iter->thead_finished = 1; // true;
+            break; // tid found no reason to iterate
         }
     }
 
     close(conn);
-    printf("connection_hadler:Closed connection from %s\n\n", client_ip);
+    syslog(LOG_INFO, "Closed connection from %s\n", client_ip);
 
     pthread_exit(NULL); 
 }
 
 
+#define errExit(msg)    do { perror(msg); exit(EXIT_FAILURE); \
+                               } while (0)
+
+
+
+
+static void timer_handler(int sig, siginfo_t *si, void *uc)
+{
+    //UNUSED(sig);
+    //UNUSED(uc);
+
+    time(&current_time);
+    time_info = localtime(&current_time);
+
+    strftime(rfc2822_string, sizeof(rfc2822_string), "%a, %d %b %Y %H:%M:%S %z\n", time_info);
+
+    //printf("%s", rfc2822_string);
+    syslog(LOG_INFO, "%s", rfc2822_string);
+
+    pthread_mutex_lock(&lock);
+    update_data_file(rfc2822_string, strlen(rfc2822_string));
+    pthread_mutex_unlock(&lock);
+}
+
+
+void timer_init()
+{
+    timer_t            timerid = 0;
+    struct itimerspec  its;
+    struct sigevent    sev = { 0 };
+    struct sigaction   sa = { 0 };
+
+    /* Create the timer. */
+    sev.sigev_notify = SIGEV_SIGNAL;
+    sev.sigev_signo = SIGRTMIN;
+    sev.sigev_value.sival_ptr = &timerid;
+    if (timer_create(CLOCK_REALTIME, &sev, &timerid) == -1)
+        errExit("timer_create");
+    
+    /* Start the timer. */
+    its.it_value.tv_sec = 10;
+    its.it_value.tv_nsec = 0;
+    its.it_interval.tv_sec = its.it_value.tv_sec;
+    its.it_interval.tv_nsec = its.it_value.tv_nsec;
+
+    if (timer_settime(timerid, 0, &its, NULL) == -1)
+        errExit("timer_settime");
+
+    /* Establish handler for timer signal. */
+    printf("Establishing handler for signal %d\n", SIGRTMIN);
+    sa.sa_flags = SA_SIGINFO;
+    sa.sa_sigaction = timer_handler; 
+    sigemptyset(&sa.sa_mask);
+
+    if (sigaction(SIGRTMIN, &sa, NULL) == -1)
+        errExit("sigaction");
+
+}
+
+void task_queue_append(pthread_t ptid, int thead_finished)
+{
+    struct thead_queue_t *new_element = malloc(sizeof(struct thead_queue_t)); 
+    if (new_element == NULL)
+    {
+        syslog(LOG_ERR, "Memory allocation failed for new element\n");
+    }
+
+    new_element->ptid = ptid;
+    new_element->thead_finished = thead_finished;
+
+    // Add the new element to the end of the list
+    SLIST_INSERT_HEAD(&head, new_element, entries); 
+}
+
+void task_queue_remove_and_free_element(struct thead_queue_t *element) 
+{
+    if (element != NULL) {
+        SLIST_REMOVE(&head, element, thead_queue_t, entries);
+        free(element);
+    }
+}
 
 
 int main(int argc, char **argv)
@@ -242,17 +304,19 @@ int main(int argc, char **argv)
     
     pthread_t ptid;
 
-    //struct ListHead task_list;
-    SLIST_INIT(&task_list); // Initialize the list
+    //SLIST_INIT(&head);
+
+
+    //timer_init(); // DEBUG, temporary disabled
 
     if (0 != init_signal_actions())
-    	return -1;
+    	exit(EXIT_FAILURE);
 
     openlog("Logs", LOG_PID, LOG_USER);
     syslog(LOG_INFO, "Start logging");
     closelog();
 
-    printf("Socket application is started...\n");
+    syslog(LOG_ERR, "Socket application is started\n");
 
     memset(&hints, 0, sizeof(hints));
     hints.ai_family = PF_INET;
@@ -261,15 +325,15 @@ int main(int argc, char **argv)
 
     if (0 != getaddrinfo(NULL, port_addr, &hints, &res))
     {
-        printf("ERROR: getaddrinfo function failed\n");
-	    return -1;
+        syslog(LOG_ERR, "Listen function failed\n");
+	    exit(EXIT_FAILURE);
     }
 
     socket_fd = socket(PF_INET, SOCK_STREAM, 0);
     if (-1 == socket_fd)
     {
-        printf("ERROR: socket function failed\n");
-        return -1;
+        syslog(LOG_ERR, "socket function failed\n");
+        exit(EXIT_FAILURE);
     }
 
 
@@ -278,90 +342,166 @@ int main(int argc, char **argv)
 
     if(-1 == bind(socket_fd, res->ai_addr, res->ai_addrlen))
     {
-        printf("ERROR: bind function failed\n");
-        printf("errno: %d\n", errno);
-        return -1;
+        syslog(LOG_ERR, "bind function failed\n");
+        exit(EXIT_FAILURE);
     }
 
     if ((argc > 1) && (strcmp(argv[1], "-d") == 0))
     {
         int pid = fork();
-        if ( 0 == pid)
-            printf("Working in child proccess\n");
+        if ( 0 == pid) {
+            syslog(LOG_INFO, "Working in child proccess\n");
+        }
         else if (pid > 0)
-            exit(-1);
+            exit(EXIT_FAILURE);
     }
 
     // ToDo: Free serviceinfo
     if (-1 == listen(socket_fd, SOMAXCONN))
     {
-       printf("ERROR: listen function failed\n");
-       return -1;
+       syslog(LOG_ERR, "Listen function failed\n");
+       exit(EXIT_FAILURE);
     }
 
     socklen_t client_addr_size = sizeof(struct sockaddr_in);
 
     if (pthread_mutex_init(&lock, NULL) != 0)
     {
-        printf("\nERROR: mutex init failed\n");
-        return 1;
+        syslog(LOG_ERR, "Failed to initialize mutex\n");
+        exit(EXIT_FAILURE);
     }
 
-    //struct ConnWorkItem *iter;
+    struct thead_queue_t *iter = NULL;
+    // task_queue_append(10, 2);
+    // task_queue_append(10, 4);
+    // task_queue_append(10, 8);
+    // task_queue_append(10, 12);
+
+    // SLIST_FOREACH(iter, &head, entries)
+    // {
+    //         //iter->thead_finished;
+    //     printf("thead_finished: %d\r\n", iter->thead_finished);  
+
+    //     printf("remove and free element\n");
+    //     task_queue_remove_and_free_element(iter);
+    // }
+
+    // task_queue_append(10, 11);
+    // task_queue_append(10, 23);
+
+    // task_queue_append(10, 90);
+
+    // SLIST_FOREACH(iter, &head, entries)
+    // {
+    //         //iter->thead_finished;
+    //     printf("thead_finished: %d\r\n", iter->thead_finished);  
+
+    //     printf("remove and free element\n");
+    //     task_queue_remove_and_free_element(iter);
+    // }
+
+
+
+    // while(1)
+    // {
+    //     //task_queue_append(10, 2);
+    //     //task_queue_append(10, 20);
+    //     //task_queue_append(10, 30);
+
+        
+       
+    //     printf("sleep\n");
+    //     usleep(2*1000000);
+    // }
+
 
     while(1)
-    {
-        printf("INFO: waitig for connection...\n");
-        printf("--------------------------------------------------\n");
-
-        conn_fd = accept(socket_fd, (struct sockaddr*)&client_addr, &client_addr_size); //location to save client
-        if (-1 == conn_fd)
-	    {
-	        printf("ERROR accept function failed\n");
-            return -1;
-        }
-
-        pthread_create(&ptid, NULL, &connection_hadler, &conn_fd);
-
-        // process_connection(new_fd);
-
-
-        struct ConnWorkItem *node;
-        // ToDo: Not forget to free
-        node = (struct ConnWorkItem*)malloc(sizeof(struct ConnWorkItem)); // Allocate memory for the new node
-        node->ptid = ptid;
-        node->work_compleated = 0;
-
-        SLIST_INSERT_HEAD(&task_list, node, entries); // Insert the node at the head of the list
-
-        // Add ptid to list
-        // put item->work_compleated = False
-        
-        //pthread_mutex_destroy(&lock);
-
-        
-        //struct ConnWorkItem *iter;
-        // // // Iterate over the list
-
-        struct ConnWorkItem *iter, *prev_node = NULL;
-
-        SLIST_FOREACH(iter, &task_list, entries) 
+    {      
+        /* Accept connection */
+        printf("DEBUG: Waiting for new connection...\n");
+        if((conn_fd = accept(socket_fd, (struct sockaddr*)&client_addr, &client_addr_size)) != -1)
         {
-            if (iter->work_compleated)
+            syslog(LOG_INFO, "The new connection wid ID: %d is accepted\n", conn_fd);
+        
+        
+            pthread_create(&ptid, NULL, &connection_hadler, &conn_fd);
+            //pthread_join(ptid, NULL);  //debug
+
+            // process_connection(new_fd);
+
+            /* add new task  to task list */
+            syslog(LOG_DEBUG, "Add task with ID: %ld to the task queue\n", ptid);
+            printf("DEBUG: Add task with ID: %ld to the task queue\n", ptid);
+            //enqueue(task_queue, ptid, false);
+
+            //displayQueue(task_queue);
+            task_queue_append(ptid, 0);        
+
+            /* Remove finished task from the task queue */
+            //struct ConnWorkItem *iter, *prev_node = NULL;
+
+            
+
+            /* */
+            // while (!isEmpty(task_queue))
+            // {
+            //     //pthread_join(iter->ptid, NULL); 
+            //     //free(iter);
+            // } 
+
+            
+            //task_queue_append(1, 20);
+            //task_queue_append(4, 200);
+
+
+
+            
+
+
+            // struct thead_queue_t *iter = NULL;
+            // printf("thead_finished: %d\r\n", iter->thead_finished);  
+            // SLIST_FOREACH(iter, &head, entries)
+            // {
+            //     //iter->thead_finished;
+            //     printf("thead_finished: %d\r\n", iter->thead_finished);  
+            // }
+            // {
+                
+            //     if (iter->work_compleated)
+            //     {
+            //         if (prev_node == NULL) {
+            //             SLIST_REMOVE_HEAD(&task_list, entries);
+            //         } else {
+            //             SLIST_REMOVE(&task_list, prev_node, ConnWorkItem, entries);
+            //         }
+            //         syslog(LOG_INFO, "Remove task from queue with ID: %ld\n\n", iter->ptid);
+            //         pthread_join(iter->ptid, NULL); 
+            //         free(iter);
+            //     }
+            //     prev_node = iter;
+            // }
+        }  
+
+        /* Iterate over the list */
+        syslog(LOG_DEBUG, "Iteration over task_list\n");
+        iter = NULL;
+        SLIST_FOREACH(iter, &head, entries)
+        {
+            if (iter->thead_finished)
             {
-                if (prev_node == NULL) {
-                    SLIST_REMOVE_HEAD(&task_list, entries);
-                } else {
-                    SLIST_REMOVE(&task_list, prev_node, ConnWorkItem, entries);
-                }
-                pthread_join(iter->ptid, NULL); 
-                free(iter);
+                printf("join thread with tid: %ld\n", iter->ptid); 
+                pthread_join(iter->ptid, NULL);
+
+                printf("remove and free element\n"); 
+                task_queue_remove_and_free_element(iter);
             }
-            prev_node = iter;
+            
+            //iter->thead_finished;
+            //printf("thead_finished: %d\r\n", iter->thead_finished);  
+
+            
+            //task_queue_remove_and_free_element(iter);
         }
-
-        printf("\n*************** HERE !!!!!!!!!!!!!\n");
-
     }
     return 0;
 }
